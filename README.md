@@ -1,6 +1,3 @@
-# aionica-intuition-audit
-Intuition Protocol - AIONICA Security Lab.
-
 # AIONICA Security Lab — Intuition Protocol
 ## Code4rena Bug Bounty Submission
 **Repository:** https://github.com/0xIntuition/intuition-contracts-v2  

@@ -14,7 +14,7 @@
 | [H-04](#h-04) | VotingEscrow whitelist bypass via EOA proxy | **High** | VotingEscrow.sol | L130 |
 | [M-01](#m-01) | `sweepAccumulatedProtocolFees()` has no access control | **Medium** | MultiVault.sol | L1044 |
 | [M-02](#m-02) | `setVaultFees()` accepts uncapped fee values | **Medium** | MultiVault.sol | L1030 |
-| [M-03](#m-03) | `_rollover` first-action deflates system emissions | **Medium** | MultiVault.sol | L1523 |
+| [M-03](#m-03) | `_rollover` first-action intra-epoch utilization distortion | **Low** | MultiVault.sol | L1523 |
 | [M-04](#m-04) | First-claim free pass gameable beyond epochs 0–1 | **Medium** | TrustBonding.sol | L495 |
 | [M-05](#m-05) | `OffsetProgressiveCurve` offset underflow in constructor | **Medium** | OffsetProgressiveCurve.sol | L67 |
 | [L-01](#l-01) | `getUserApy` unit mismatch: `currentApy` vs `maxApy` | **Low** | TrustBonding.sol | L265 |
@@ -186,7 +186,7 @@ Also route via timelock.
 ---
 
 <a name="m-03"></a>
-### [M-03] `_rollover` first-action-of-epoch manipulable to deflate system emissions
+### [M-03] `_rollover` first-action-of-epoch allows transient intra-epoch utilization distortion
 
 **File:** `src/protocol/MultiVault.sol`  
 **Lines:** L1523–1545  
@@ -195,53 +195,46 @@ Also route via timelock.
 
 ### Description
 
-The system-wide rollover in `_rollover()` copies `totalUtilization[previousEpoch]` to the current epoch only when `totalUtilization[currentEpoch] == 0` — meaning it fires exactly once per epoch, on the first user action.
+The system-wide rollover in `_rollover()` copies `totalUtilization[previousEpoch]` to the current epoch only when `totalUtilization[currentEpoch] == 0`, meaning it executes exactly once per epoch — on the first user action.
 
 ```solidity
-function _rollover(address user) internal {
-    uint256 currentEpochLocal = _currentEpoch();
-
-    // System rollover: fires on FIRST action of a new epoch
-    if (currentEpochLocal > 0 && totalUtilization[currentEpochLocal] == 0) {
-        uint256 previousEpoch = currentEpochLocal - 1;
-        if (totalUtilization[previousEpoch] != 0) {
-            totalUtilization[currentEpochLocal] = totalUtilization[previousEpoch]; // copy
-        }
+if (currentEpochLocal > 0 && totalUtilization[currentEpochLocal] == 0) {
+    uint256 previousEpoch = currentEpochLocal - 1;
+    if (totalUtilization[previousEpoch] != 0) {
+        totalUtilization[currentEpochLocal] = totalUtilization[previousEpoch];
     }
-    // ...
-    totalUtilization[epoch] -= amountToRemove; // if called via _removeUtilization
 }
 ```
 
-**Attack:** If an attacker calls `redeem()` as the very first transaction of a new epoch:
-1. Rollover copies `totalUtilization[prev]` to `totalUtilization[current]`
-2. `_removeUtilization` immediately subtracts the redeemed amount from the just-copied value
-3. In the next epoch with no other deposits, the deflated value rolls forward again
-4. This compounds: each epoch's baseline is lower, reducing `systemUtilizationRatio` → lower emissions for all stakers
+If the first transaction of a new epoch is a `redeem()` call:
 
-### Proof of Concept
+1. Rollover copies the previous epoch's utilization into the new epoch.
+2. `_removeUtilization` immediately subtracts the redeemed amount from that copied value.
+3. The reduced `totalUtilization[currentEpoch]` becomes the effective baseline for system utilization calculations in that epoch.
 
-```
-Epoch 4 ends: totalUtilization[4] = 1000 TRUST
-
-Attacker is first to act in epoch 5:
-  _rollover: totalUtilization[5] = 1000  (copied from epoch 4)
-  _removeUtilization(200): totalUtilization[5] = 800
-
-No other deposits in epoch 5.
-Epoch 6 starts:
-  _rollover: totalUtilization[6] = 800   (deflated baseline)
-
-Attacker repeats → each epoch's emissions are lower than they should be.
-```
+There is no retroactive modification of past epochs and no cross-epoch compounding. The effect is limited to the current epoch and depends on being the first actor.
 
 ### Impact
 
-Sustained deflation of `systemUtilizationRatio` reduces the total emissions available to all stakers in affected epochs. The attacker loses deposit fees but gains competitive advantage as other stakers receive fewer rewards while the attacker's share (if they are also a staker) remains proportionally higher.
+A first actor in a new epoch can temporarily influence the system utilization baseline used for emission calculations within that epoch if they redeem before any deposits occur.
+
+This effect:
+- Is limited to a single epoch
+- Does not compound across epochs
+- Requires precise timing (first action of epoch)
+- Can be neutralized by subsequent deposits in the same epoch
+
+The issue represents a transient economic distortion rather than a structural accounting flaw.
 
 ### Recommendation
 
-Separate system rollover from individual user actions. Execute the system rollover via a dedicated keeper call at epoch boundaries, or snapshot `totalUtilization` only at epoch-end timestamps rather than on the first user action.
+Avoid deriving system-wide epoch baselines from the first user action. Possible approaches:
+
+- Snapshot `totalUtilization` at epoch boundaries via a dedicated keeper call
+- Store immutable epoch-end utilization values instead of copying on first interaction
+- Prevent `_removeUtilization` from modifying a freshly rolled-over baseline within the same transaction
+
+Separating rollover logic from user-triggered state changes removes timing-based influence over emission calculations.
 
 ---
 
